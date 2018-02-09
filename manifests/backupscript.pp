@@ -12,16 +12,6 @@ define openldap::backupscript(
 
   validate_string($destination)
 
-  #if ($openldap::mdb == "mdb")
-  #{
-  #	warn("http://www.openldap.org/faq/data/cache/287.html")
-  #}
-
-  if defined(Class['netbackupclient'])
-  {
-    netbackupclient::includedir{ $destination: }
-  }
-
   exec { "mkdir_p_${destination}":
     command     => "/bin/mkdir -p ${destination}",
     refreshonly => true,
@@ -46,14 +36,7 @@ define openldap::backupscript(
     group   => 'root',
     mode    => '0700',
     require => Package['lmdb'],
-    content => template("${module_name}/openldap_backup.erb")
-  }
-
-  cron { 'backupopenldap':
-    command => $backupscript,
-    user    => 'root',
-    hour    => $hour,
-    minute  => $minute,
+    content => file("${module_name}/openldap_backup.sh")
   }
 
   if($backupscriptconf)
@@ -66,6 +49,13 @@ define openldap::backupscript(
       require => Package['lmdb'],
       content => template("${module_name}/openldap_backup_conf.erb")
     }
+
+    cron { 'backupopenldap':
+      command => "${backupscript} ${backupscriptconf}",
+      user    => 'root',
+      hour    => $hour,
+      minute  => $minute,
+    }
   }
   else
   {
@@ -75,7 +65,14 @@ define openldap::backupscript(
       group   => 'root',
       mode    => '0700',
       require => Package['lmdb'],
-      content => template("${module_name}/openldap_backup_conf.erb")
+      content => template("${module_name}/backup/openldap_backup_conf.erb")
+    }
+
+    cron { 'backupopenldap':
+      command => $backupscript,
+      user    => 'root',
+      hour    => $hour,
+      minute  => $minute,
     }
   }
 }

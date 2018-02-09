@@ -3,26 +3,32 @@ class openldap::server(
                         $admin,
                         $adminpassword,
                         $oname,
-                        $slapdtmpbase     = $openldap::params::slapdtmpbase,
-                        $is_master        = false,
-                        $masterinfo       = undef,
-                        $mm               = undef,
-                        $serverid         = '1',
-                        $backend          = 'bdb',
-                        $updateref        = undef,
-                        $chainingoverlay  = undef,
-                        $customschema     = undef,
-                        $custominitdb     = undef,
-                        $mdbsize          = '9126805504',
-                        $tlsca            = undef,
-                        $tlscert          = undef,
-                        $tlspk            = undef,
-                        $tlsstrongciphers = true,
-                        $debuglevel       = '0',
-                        $checkmdbusage    = '/usr/local/bin/check_mdb_usage',
-                        $idletimeout      = '300',
-                        $writetimeout     = '300',
-                        $anonbind         = false,
+                        $slapdtmpbase          = $openldap::params::slapdtmpbase,
+                        $is_master             = false,
+                        $masterinfo            = undef,
+                        $mm                    = undef,
+                        $serverid              = '1',
+                        $backend               = 'bdb',
+                        $updateref             = undef,
+                        $chainingoverlay       = undef,
+                        $customschema          = undef,
+                        $custominitdb          = undef,
+                        $mdbsize               = '9126805504',
+                        $tlsca                 = undef,
+                        $tlscert               = undef,
+                        $tlspk                 = undef,
+                        $tlsstrongciphers      = true,
+                        $tls_protocol_min      = undef,
+                        $tls_cipher_suite      = undef,
+                        $debuglevel            = '0',
+                        $checkmdbusage         = '/usr/local/bin/check_mdb_usage',
+                        $idletimeout           = '300',
+                        $writetimeout          = '300',
+                        $anonbind              = false,
+                        $manage_service        = true,
+                        $manage_docker_service = true,
+                        $service_ensure        = 'running',
+                        $service_enable        = true,
                       ) {
 
   #Openldap::Schema <| |> -> Openldap::Indexes <| |>
@@ -40,36 +46,58 @@ class openldap::server(
   if ($customschema!=undef) { validate_string($customschema) }
   #if ($mdbsize) { validate_integer($mdbsize) }
   if ($checkmdbusage!=undef) { validate_absolute_path($checkmdbusage) }
-
   if ($masterinfo!=undef) { validate_array($masterinfo) }
 
 
-  #WTF? marranda per validar al params, shauria de refer
-  if(!defined(Class['openldap::params']))
+  if ($openldap::server::updateref) and ($openldap::server::chainingoverlay)
   {
-    class { 'openldap::params': }
+    fail("updateref (${openldap::server::updateref}) and chainingoverlay (${openldap::server::chainingoverlay}) are incompatible")
   }
 
-  package { $openldap::params::ldapserver_pkg:
-    ensure  => 'installed',
-    require => Class['openldap::params'], #ugly hack
+  if($openldap::server::backend != 'mdb') and ($openldap::server::mdbsize)
+  {
+    fail("mdbsize incompatible with backend ${openldap::server::backend}")
   }
 
-  if($checkmdbusage)
+  if ($openldap::server::tlca) or ($openldap::server::tlscert) or ($openldap::server::tlspk)
   {
-    file { $checkmdbusage:
-      ensure  => 'present',
-      owner   => 'root',
-      group   => 'root',
-      mode    => '0755',
-      content => template("${module_name}/check_mdb_usage.erb")
+    if($openldap::server::tlca==undef) or ($openldap::server::tlscert==undef) or ($openldap::server::tlspk==undef)
+    {
+      fail("tls error, something is missing: CA: ${openldap::server::tlca} CERT: ${openldap::server::tlscert} PK: ${openldap::server::tlspk}")
+    }
+  }
+
+  if($openldap::server::backend)
+  {
+    case $openldap::server::backend
+    {
+      'bdb': { }
+      'mdb': { }
+      default: { fail("${openldap::server::backend} is not supported") }
     }
   }
 
   if ($mm!=undef)
   {
     validate_array($mm)
-    #validate_integer($serverid)
+  }
+
+  include ::openldap
+  include ::openldap::client
+
+  package { $openldap::params::ldapserver_pkg:
+    ensure  => 'installed',
+  }
+
+  if($checkmdbusage!=undef)
+  {
+    file { $checkmdbusage:
+      ensure  => 'present',
+      owner   => 'root',
+      group   => 'root',
+      mode    => '0755',
+      content => file("${module_name}/check_mdb_usage.sh")
+    }
   }
 
   if ($backend == 'bdb')
@@ -80,7 +108,7 @@ class openldap::server(
       group   => 'root',
       mode    => '0644',
       require => Package[$openldap::params::ldapserver_pkg],
-      notify  => Service['slapd'],
+      notify  => Class['::openldap::server::service'],
       content => template("${module_name}/dbconfig.erb")
     }
   }
@@ -133,24 +161,19 @@ class openldap::server(
     owner   => 'root',
     group   => 'root',
     mode    => '0644',
-    notify  => Service['slapd'],
+    notify  => Class['::openldap::server::service'],
     content => template("${module_name}/sysconfigldap.erb"),
     require => Package[$openldap::params::ldapserver_pkg],
   }
 
-
-  service { 'slapd':
-    ensure  => 'running',
-    enable  => true,
-    require => File['/etc/sysconfig/ldap'],
-  }
+  include ::openldap::server::service
 
   file { $slapdtmpbase:
     ensure  => 'directory',
     owner   => 'root',
     group   => 'root',
     mode    => '0700',
-    require => Service['slapd']
+    require => Class['::openldap::server::service']
   }
 
   if ($customschema)
@@ -299,103 +322,149 @@ class openldap::server(
   # enable TLS
   #
 
-  file { "${slapdtmpbase}/enabletls":
-    ensure  => 'present',
-    owner   => 'root',
-    group   => 'root',
-    mode    => '0640',
-    require => Exec['bash initdb'],
-    notify  => Exec['bash enabletls'],
-    audit   => 'content',
-    content => template("${module_name}/enabletls.erb"),
-  }
+  if($tlspk!=undef)
+  {
+    # replace: olcTLSCACertificateFile
+    # olcTLSCACertificateFile: /etc/pki/tls/certs/openldap-slapd-ca.crt
+    openldap_config { 'olcTLSCACertificateFile':
+      ensure => 'present',
+      value  => '/etc/pki/tls/certs/openldap-slapd-ca.crt',
+    }
+    # replace: olcTLSCertificateFile
+    # olcTLSCertificateFile: /etc/pki/tls/certs/openldap-slapd-cert.crt
+    openldap_config { 'olcTLSCertificateFile':
+      ensure => 'present',
+      value  => '/etc/pki/tls/certs/openldap-slapd-cert.crt',
+    }
+    # replace: olcTLSCertificateKeyFile
+    # olcTLSCertificateKeyFile: /etc/pki/tls/private/openldap-slapd.pk
+    openldap_config { 'olcTLSCertificateKeyFile':
+      ensure => 'present',
+      value  => '/etc/pki/tls/private/openldap-slapd.pk',
+    }
 
-  exec { 'bash enabletls':
-    command     => "/bin/bash ${slapdtmpbase}/enabletls",
-    refreshonly => true,
+    if($tlsstrongciphers)
+    {
+      # replace: olcTLSProtocolMin
+      # olcTLSProtocolMin: 3.1
+      # replace: olcTLSCipherSuite
+      # olcTLSCipherSuite: HIGH:!RC4:!MD5:!3DES:!DES:!aNULL:!eNULL
+      openldap_config { 'olcTLSProtocolMin':
+        ensure => 'present',
+        value  => '3.1',
+      }
+
+      openldap_config { 'olcTLSCipherSuite':
+        ensure => 'present',
+        value  => 'HIGH:!RC4:!MD5:!3DES:!DES:!aNULL:!eNULL',
+      }
+    }
+    else
+    {
+      if($tls_protocol_min!=undef)
+      {
+        openldap_config { 'olcTLSProtocolMin':
+          ensure => 'present',
+          value  => $tls_protocol_min,
+        }
+      }
+      else
+      {
+        openldap_config { 'olcTLSProtocolMin':
+          ensure => 'absent',
+        }
+      }
+
+      if($tls_cipher_suite!=undef)
+      {
+        openldap_config { 'olcTLSCipherSuite':
+          ensure => 'present',
+          value  => $tls_cipher_suite,
+        }
+      }
+      else
+      {
+        openldap_config { 'olcTLSCipherSuite':
+          ensure => 'absent',
+        }
+      }
+    }
+  }
+  else
+  {
+    openldap_config { 'olcTLSCACertificateFile':
+      ensure => 'absent',
+    }
+    openldap_config { 'olcTLSCertificateFile':
+      ensure => 'absent',
+    }
+    openldap_config { 'olcTLSCertificateKeyFile':
+      ensure => 'absent',
+    }
+    openldap_config { 'olcTLSProtocolMin':
+      ensure => 'absent',
+    }
+    openldap_config { 'olcTLSCipherSuite':
+      ensure => 'absent',
+    }
   }
 
   #
   # log level
-  #
-
-  file { "${slapdtmpbase}/loglevel":
-    ensure  => 'present',
-    owner   => 'root',
-    group   => 'root',
-    mode    => '0640',
-    require => Exec['bash initdb'],
-    content => template("${module_name}/loglevel.erb"),
-    notify  => Exec['bash loglevel'],
-    audit   => 'content',
+  # replace: olcLogLevel
+  # olcLogLevel: <%= @debuglevel %>
+  openldap_config { 'olcLogLevel':
+    ensure => 'present',
+    value  => $debuglevel,
   }
 
-  exec { 'bash loglevel':
-    command     => "/bin/bash ${slapdtmpbase}/loglevel",
-    refreshonly => true,
-  }
 
   #
-  # idle timeout
+  # timeouts
   #
+  # replace: olcIdleTimeout
+  # olcIdleTimeout: <%= @idletimeout %>
+  # idletimeout
+  #
+  # replace: olcWriteTimeout
+  # olcWriteTimeout: <%= @writetimeout %>
+  # writetimeout
 
-  file { "${slapdtmpbase}/idletimeouts":
-    ensure  => 'present',
-    owner   => 'root',
-    group   => 'root',
-    mode    => '0640',
-    require => Exec['bash initdb'],
-    content => template("${module_name}/idletimeouts.erb"),
-    notify  => Exec['bash idletimeouts'],
-    audit   => 'content',
+  openldap_config { 'olcIdleTimeout':
+    ensure => 'present',
+    value  => $idletimeout,
   }
 
-  exec { 'bash idletimeouts':
-    command     => "/bin/bash ${slapdtmpbase}/idletimeouts",
-    refreshonly => true,
+  openldap_config { 'olcWriteTimeout':
+    ensure => 'present',
+    value  => $writetimeout,
   }
 
   #
   # anon bind
-  #
+  # add: olcDisallows
+  # olcDisallows: bind_anon
 
-  file { "${slapdtmpbase}/anonbind":
-    ensure  => 'present',
-    owner   => 'root',
-    group   => 'root',
-    mode    => '0640',
-    require => Exec['bash initdb'],
-    content => template("${module_name}/anonbind.erb"),
-    notify  => Exec['bash anonbind'],
-    audit   => 'content',
+  if($anonbind)
+  {
+    openldap_config { 'olcDisallows':
+      ensure => 'absent',
+    }
   }
-
-  exec { 'bash anonbind':
-    command     => "/bin/bash ${slapdtmpbase}/anonbind",
-    refreshonly => true,
+  else
+  {
+    openldap_config { 'olcDisallows':
+      ensure => 'present',
+      value  => 'bind_anon',
+    }
   }
 
   #
   # server ID
-  #
-
-  file { "${slapdtmpbase}/serverid":
-    ensure  => 'present',
-    owner   => 'root',
-    group   => 'root',
-    mode    => '0640',
-    require => Exec['bash initdb'],
-    content => template("${module_name}/serverid.erb"),
-    notify  => Exec['bash serverid'],
-    audit   => 'content',
+  # replace: olcServerID
+  # olcServerID: <%= @serverid %>
+  openldap_config { 'olcServerID':
+    ensure => 'present',
+    value  => $serverid,
   }
-
-  #tarda bastant -_-
-  exec { 'bash serverid':
-    command     => "/bin/bash ${slapdtmpbase}/serverid",
-    refreshonly => true,
-    timeout     => 0,
-  }
-
-
 }
